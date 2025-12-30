@@ -1,4 +1,3 @@
-# line-following-robot
 # 🤖 ESP32 PID Line Follower Robot with NeoPixel Indicator
 
 This project is a **PID-based line following robot** using **ESP32**, **5 IR line sensors**, and **NeoPixel LEDs** for visual feedback.  
