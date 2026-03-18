@@ -1,177 +1,223 @@
-#include "esp32-hal-gpio.h"
-#include "esp32-hal.h"
-#include <Adafruit_NeoPixel.h>
+// ---------------- MOTOR PINS ----------------
+#define Rforward 19
+#define Rbackward 21
+#define Lforward 22
+#define Lbackward 23
 
-#define LED_PIN 5
-#define NUM_LEDS 5
-Adafruit_NeoPixel strip(NUM_LEDS, LED_PIN, NEO_GRB + NEO_KHZ800);
+#define Rspeed 17
+#define Lspeed 5
 
-// Motor driver pins (L293D or L298N)
-#define ena_f 14
-#define ena_b 27
-#define enb_f 23
-#define enb_b 19
-#define speed_a 13  // RIGHT MOTOR PWM
-#define speed_b 12  // LEFT MOTOR PWM
 
-const byte no_of_sensor = 5;
-const byte sensor_pin[no_of_sensor] = { 34, 35, 32, 33, 25 };
-const byte sensor_weight[no_of_sensor] = { 0, 1, 2, 3, 4 };
+// ---------------- SENSOR CONFIG ----------------
+#define num_of_sensor 7
 
-float basespeed = 200;
-float last_error = 0, integral = 0;
-float kp = 100, ki = 0, kd = 0;
+int sensorPin[num_of_sensor] = {34, 35, 32, 33, 25, 26, 27};
 
-// timeout logic
-unsigned long lastline_time = 0;
-unsigned long timeout_duration = 1500;
+int weight[7] = { -3, -2, -1, 0, 1, 2, 3 };
 
+
+// ---------------- DELAY PARAMETERS ----------------
+#define turn_delay 10
+#define u_turn_delay 50
+#define stop_timer 30
+
+
+// ---------------- MOTOR SPEED VARIABLES ----------------
+uint8_t max_speed = 250;
+
+int left_motor_speed = 200;
+int right_motor_speed = 200;
+
+uint8_t turn_speed = 150;
+
+
+// ---------------- PID VARIABLES ----------------
+int kp = 70;
+int kd = 10;
+
+int pid;
+int error;
+int last_error;
+
+bool turning_state = false;
+uint8_t turn_value = 0;
+
+uint8_t sensor_sum = 0;
+
+
+// ---------------- SETUP ----------------
 void setup() {
+
   Serial.begin(115200);
-  strip.begin();
-  strip.show();
 
-  for (byte i = 0; i < no_of_sensor; i++)
-    pinMode(sensor_pin[i], INPUT);
+  pinMode(Lforward, OUTPUT);
+  pinMode(Lbackward, OUTPUT);
+  pinMode(Rforward, OUTPUT);
+  pinMode(Rbackward, OUTPUT);
 
-  pinMode(ena_f, OUTPUT);
-  pinMode(ena_b, OUTPUT);
-  pinMode(enb_f, OUTPUT);
-  pinMode(enb_b, OUTPUT);
+  pinMode(Rspeed, OUTPUT);
+  pinMode(Lspeed, OUTPUT);
 
-  pinMode(speed_a, OUTPUT);
-  pinMode(speed_b, OUTPUT);
-
-  Serial.println("analogWrite Ready");
+  for (int i = 0; i < num_of_sensor; i++) {
+    pinMode(sensorPin[i], INPUT);
+  }
 }
 
+
+// ---------------- LOOP ----------------
 void loop() {
-  float pos = position();
-  position_indicator(pos);
+  Line_Follow();
+}
 
-  static unsigned long lastPID = 0;
 
-  if (pos == -1 && millis() - lastline_time > timeout_duration) {
-    stop();
-  } else if (pos != -1) {
-    lastline_time = millis();
+// ---------------- SENSOR READING ----------------
+void read_sensor() {
 
-    if (millis() - lastPID >= 5) {
-      lastPID = millis();
-      pid_controller(pos);
+  error = 0;
+  sensor_sum = 0;
+
+  for (int i = 0; i < num_of_sensor; i++) {
+
+    if (digitalRead(sensorPin[i]) == 1) {
+
+      error = error + weight[i];
+      sensor_sum++;
     }
   }
-  // for debugging
-  Serial.println("position - ");
-  Serial.print(pos);
-  for(int i = 0 ; i <no_of_sensor ; i++){
-    Serial.println("sensor");
-    Serial.print(i);
-    Serial.print(" - ");
-    int val = digitalRead(sensor_pin[i]);
-    Serial.print(val);
-  }
+  Serial.println("------------------------------ ");
+  Serial.print("error -- ");
+  Serial.println(error);
+  Serial.print("sensor_sum -- ");
+  Serial.println(sensor_sum);
+
+  if (error == 0 && sensor_sum == 0)
+    error = last_error;
 }
 
-void pid_controller(float pos) {
-  float error = 2 - pos;
-  float d = error - last_error;
 
+// ---------------- PID LINE FOLLOW ----------------
+void Line_Follow() {
 
-  if (error == 0 || pos == -1) {
-    integral = 0;
-  } else {
-    integral += error;
-    integral = constrain(integral, -100, 100);
-  }
+  read_sensor();
+  turn_detection();
 
-  
+  if (turning_state)
+    return;
+
+  pid = error * kp + kd * (error - last_error);
 
   last_error = error;
 
-  float pid = (kp * error) + (ki * integral) + (kd * d);
+  Serial.print("pid -- ");
+  Serial.println(pid);
 
-  float left = basespeed + pid;
-  float right = basespeed - pid;
+  int right_motor = right_motor_speed - pid;
+  int left_motor = left_motor_speed + pid;
 
-  left = constrain(left, -255, 255);
-  right = constrain(right, -255, 255);
-
-  Serial.print("PID = ");
-  Serial.print(pid);
-  Serial.print(" | I = ");
-  Serial.print(integral);
-  Serial.print(" | L = ");
-  Serial.print(left);
-  Serial.print(" | R = ");
-  Serial.println(right);
-
-  motor_control(right, left);
-
-  delay(1);
+  motor(left_motor, right_motor);
 }
 
 
-void motor_control(float left, float right) {
+// ---------------- TURN DETECTION ----------------
+void turn_detection() {
 
-  // LEFT MOTOR
-  if (left >= 0) {
-    digitalWrite(ena_f, HIGH);
-    digitalWrite(ena_b, LOW);
-  } else {
-    digitalWrite(ena_f, LOW);
-    digitalWrite(ena_b, HIGH);
-  }
-  analogWrite(speed_b, abs(left));
+  if (digitalRead(sensorPin[6]) == 1 && digitalRead(sensorPin[0]) == 0)
+    turn_value = 1;
 
-  // RIGHT MOTOR
-  if (right >= 0) {
-    digitalWrite(enb_f, HIGH);
-    digitalWrite(enb_b, LOW);
-  } else {
-    digitalWrite(enb_f, LOW);
-    digitalWrite(enb_b, HIGH);
-  }
-  analogWrite(speed_a, abs(right));
-}
+  if (digitalRead(sensorPin[0]) == 1 && digitalRead(sensorPin[6]) == 0)
+    turn_value = 2;
 
-void stop() {
-  digitalWrite(ena_f, LOW);
-  digitalWrite(ena_b, LOW);
-  digitalWrite(enb_f, LOW);
-  digitalWrite(enb_b, LOW);
 
-  analogWrite(speed_a, 0);
-  analogWrite(speed_b, 0);
-}
+  if (sensor_sum == 0 && !turning_state) {
 
-float position() {
-  int num = 0;
-  int den = 0;
+    if (turn_value == 1) {
 
-  for (byte i = 0; i < no_of_sensor; i++) {
-    if (digitalRead(sensor_pin[i])) {
-      num += sensor_weight[i];
-      den++;
+      delay(turn_delay);
+      motor(-turn_speed, turn_speed);
+      turning_state = true;
+    }
+
+    else if (turn_value == 2) {
+
+      delay(turn_delay);
+      motor(turn_speed, -turn_speed);
+      turning_state = true;
+    }
+
+    else if (turn_value == 0) {
+
+      delay(u_turn_delay);
+      motor(turn_speed, -turn_speed);
+      turning_state = true;
     }
   }
-  return (den > 0) ? ((float)num / den) : -1;
+
+
+  if (turning_state) {
+
+    if (digitalRead(sensorPin[2]) == 0 || digitalRead(sensorPin[3]) == 0 || digitalRead(sensorPin[4]) == 0) {
+
+      turning_state = false;
+      turn_value = 0;
+    }
+
+    return;
+  }
+
+
+  else if (sensor_sum == 7) {
+
+    delay(stop_timer);
+
+    read_sensor();
+
+    if (sensor_sum == 7) {
+
+      while (sensor_sum == 7) {
+
+        read_sensor();
+        motor(0, 0);
+      }
+    }
+
+    else if (sensor_sum == 0) {
+
+      turn_value = 2;
+      turning_state = true;
+    }
+  }
 }
 
-void position_indicator(float pos) {
-  float pos_indicator = (pos >= 0) ? (4 - pos) : -1;
 
-  strip.clear();
-  if (pos_indicator >= 0) {
-    int lowerLED = floor(pos_indicator);
-    int upperLED = ceil(pos_indicator);
-    float frac = pos_indicator - lowerLED;
+// ---------------- MOTOR FUNCTION ----------------
+void motor(int left, int right) {
 
-    if (lowerLED >= 0 && lowerLED < NUM_LEDS)
-      strip.setPixelColor(lowerLED, strip.Color(255 * (1 - frac), 0, 0));
-
-    if (upperLED >= 0 && upperLED < NUM_LEDS && upperLED != lowerLED)
-      strip.setPixelColor(upperLED, strip.Color(255 * frac, 0, 0));
+  if (right > 0) {
+    digitalWrite(Rforward, HIGH);
+    digitalWrite(Rbackward, LOW);
   }
-  strip.show();
+  else {
+    right = -right;
+    digitalWrite(Rforward, LOW);
+    digitalWrite(Rbackward, HIGH);
+  }
+
+
+  if (left > 0) {
+    digitalWrite(Lforward, HIGH);
+    digitalWrite(Lbackward, LOW);
+  }
+  else {
+    left = -left;
+    digitalWrite(Lforward, LOW);
+    digitalWrite(Lbackward, HIGH);
+  }
+
+
+  if (left > max_speed) left = max_speed;
+  if (right > max_speed) right = max_speed;
+
+
+  analogWrite(Lspeed, left);
+  analogWrite(Rspeed, right);
 }
